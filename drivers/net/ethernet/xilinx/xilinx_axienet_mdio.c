@@ -17,8 +17,28 @@
 
 #include "xilinx_axienet.h"
 
-#define MAX_MDIO_FREQ		2500000 /* 2.5 MHz */
+#define MAX_MDIO_FREQ		2000000 /* 2.0 MHz */
 #define DEFAULT_HOST_CLOCK	150000000 /* 150 MHz */
+
+#define C45_MDIO_MCR_OP_ADDR		0x0
+#define C45_MDIO_MCR_OP_DATA		0x1
+#define C45_MDIO_MCR_OP_DATA_INC_WO	0x3
+#define C45_MDIO_MCR_OP_DATA_INC_RW	0x2
+
+#define C22_REG13_NUM		13
+#define C22_REG14_NUM		14
+
+/* Write to C22 register 13 the requested Op Code and Device Address (DEVAD).
+ * The DEVAD is the upper 16 bits of the regnum passed in from the core. */
+#define C22_REG13_MASK(op, reg) \
+	(((op & 0x3) << (XAE_MDIO_MCR_OP_SHIFT + 1)) \
+	| ((reg >> MII_DEVADDR_C45_SHIFT) & 0x1F))
+
+/* Prototypes of read and write functions for other functions in this file to
+ * use. */
+static int axienet_mdio_write(struct mii_bus *bus, int phy_id, int reg,
+			      u16 val);
+static int axienet_mdio_read(struct mii_bus *bus, int phy_id, int reg);
 
 /* Wait till MDIO interface is ready to accept a new transaction.*/
 int axienet_mdio_wait_until_ready(struct axienet_local *lp)
@@ -28,6 +48,46 @@ int axienet_mdio_wait_until_ready(struct axienet_local *lp)
 	return readx_poll_timeout(axinet_ior_read_mcr, lp,
 				  val, val & XAE_MDIO_MCR_READY_MASK,
 				  1, 20000);
+}
+
+/**
+ * axienet_mdio_c45_helper - Help write C22 Registers 13 and 14 the
+ * Address and Data Op Codes needed for reading and writing the C45
+ * registers.
+ * @bus:	Pointer to mii bus structure
+ * @phy_id:	Address of the PHY device
+ * 
+ * Return:	0 on success, -ETIMEDOUT on a timeout
+ */
+static int axienet_mdio_c45_helper(struct mii_bus *bus, int phy_id, int reg)
+{
+	int ret;
+	struct axienet_local *lp = bus->priv;
+
+	/* Write to C22 Register 13 the C45 Address Op Code and the device
+	 * address (DEVAD). */
+	ret = axienet_mdio_write(bus, 
+			phy_id,
+			C22_REG13_NUM,
+			C22_REG13_MASK(C45_MDIO_MCR_OP_ADDR, reg));
+	if (ret < 0)
+		return ret;
+
+	/* Write the C45 register address to C22 Register 14. */
+	ret = axienet_mdio_write(bus, phy_id, C22_REG14_NUM, (reg & MII_REGADDR_C45_MASK));
+	if (ret < 0)
+		return ret;
+
+	/* Write to C22 Register 13 the Data OP Code and DEVAD. */
+	ret = axienet_mdio_write(bus, 
+			phy_id,
+			C22_REG13_NUM,
+			C22_REG13_MASK(C45_MDIO_MCR_OP_DATA, reg));
+	if (ret < 0)
+		return ret;
+
+	ret = axienet_mdio_wait_until_ready(lp);
+	return ret;
 }
 
 /**
@@ -48,17 +108,36 @@ static int axienet_mdio_read(struct mii_bus *bus, int phy_id, int reg)
 	int ret;
 	struct axienet_local *lp = bus->priv;
 
-	ret = axienet_mdio_wait_until_ready(lp);
-	if (ret < 0)
-		return ret;
+	if(reg & MII_ADDR_C45)
+	{
+		ret = axienet_mdio_c45_helper(bus, phy_id, reg);
+		if (ret < 0)
+			return ret;
 
-	axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
-		    (((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
-		      XAE_MDIO_MCR_PHYAD_MASK) |
-		     ((reg << XAE_MDIO_MCR_REGAD_SHIFT) &
-		      XAE_MDIO_MCR_REGAD_MASK) |
-		     XAE_MDIO_MCR_INITIATE_MASK |
-		     XAE_MDIO_MCR_OP_READ_MASK));
+		/* Read from C22 Register 14 the C45 register contents. */
+		axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
+				(((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
+				XAE_MDIO_MCR_PHYAD_MASK) |
+				((C22_REG14_NUM << XAE_MDIO_MCR_REGAD_SHIFT) &
+				XAE_MDIO_MCR_REGAD_MASK) |
+				XAE_MDIO_MCR_INITIATE_MASK |
+				XAE_MDIO_MCR_OP_READ_MASK));
+	}
+	else
+	{
+		ret = axienet_mdio_wait_until_ready(lp);
+		if (ret < 0)
+			return ret;
+
+		axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
+				(((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
+				XAE_MDIO_MCR_PHYAD_MASK) |
+				((reg << XAE_MDIO_MCR_REGAD_SHIFT) &
+				XAE_MDIO_MCR_REGAD_MASK) |
+				XAE_MDIO_MCR_INITIATE_MASK |
+				XAE_MDIO_MCR_OP_READ_MASK));
+	}
+
 
 	ret = axienet_mdio_wait_until_ready(lp);
 	if (ret < 0)
@@ -98,14 +177,36 @@ static int axienet_mdio_write(struct mii_bus *bus, int phy_id, int reg,
 	if (ret < 0)
 		return ret;
 
-	axienet_iow(lp, XAE_MDIO_MWD_OFFSET, (u32) val);
-	axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
-		    (((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
-		      XAE_MDIO_MCR_PHYAD_MASK) |
-		     ((reg << XAE_MDIO_MCR_REGAD_SHIFT) &
-		      XAE_MDIO_MCR_REGAD_MASK) |
-		     XAE_MDIO_MCR_INITIATE_MASK |
-		     XAE_MDIO_MCR_OP_WRITE_MASK));
+	if(reg & MII_ADDR_C45)
+	{
+		/* Write to C22 Registers 13 and 14 the Address and Data Op codes. */
+		ret = axienet_mdio_c45_helper(bus, phy_id, reg);
+		if (ret < 0)
+			return ret;
+
+		/* Write to C22 Register 14 the C45 register value. */
+		axienet_iow(lp, XAE_MDIO_MWD_OFFSET, (u32) val);
+		axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
+				(((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
+				XAE_MDIO_MCR_PHYAD_MASK) |
+				((C22_REG14_NUM << XAE_MDIO_MCR_REGAD_SHIFT) &
+				XAE_MDIO_MCR_REGAD_MASK) |
+				XAE_MDIO_MCR_INITIATE_MASK |
+				XAE_MDIO_MCR_OP_WRITE_MASK));
+
+	}
+	else
+	{
+		axienet_iow(lp, XAE_MDIO_MWD_OFFSET, (u32) val);
+		axienet_iow(lp, XAE_MDIO_MCR_OFFSET,
+				(((phy_id << XAE_MDIO_MCR_PHYAD_SHIFT) &
+				XAE_MDIO_MCR_PHYAD_MASK) |
+				((reg << XAE_MDIO_MCR_REGAD_SHIFT) &
+				XAE_MDIO_MCR_REGAD_MASK) |
+				XAE_MDIO_MCR_INITIATE_MASK |
+				XAE_MDIO_MCR_OP_WRITE_MASK));
+	}
+
 
 	ret = axienet_mdio_wait_until_ready(lp);
 	if (ret < 0)
