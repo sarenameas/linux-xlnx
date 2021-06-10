@@ -318,7 +318,7 @@
 #define XAE_MDIO_MCR_REGAD_MASK		0x001F0000 /* Reg Address Mask */
 #define XAE_MDIO_MCR_REGAD_SHIFT	16	   /* Reg Address Shift */
 #define XAE_MDIO_MCR_OP_MASK		0x0000C000 /* Operation Code Mask */
-#define XAE_MDIO_MCR_OP_SHIFT		13	   /* Operation Code Shift */
+#define XAE_MDIO_MCR_OP_SHIFT		14	   /* Operation Code Shift */
 #define XAE_MDIO_MCR_OP_READ_MASK	0x00008000 /* Op Code Read Mask */
 #define XAE_MDIO_MCR_OP_WRITE_MASK	0x00004000 /* Op Code Write Mask */
 #define XAE_MDIO_MCR_INITIATE_MASK	0x00000800 /* Ready Mask */
